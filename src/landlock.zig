@@ -64,13 +64,12 @@ fn restrictSelf(ruleset_fd: c_int) !void {
     }
 }
 
-pub fn setup(config: LandlockConfig) !void {
+pub fn setup(allowed_paths: []const []const u8) !void {
     // Enable no_new_privs (required for Landlock)
     _ = try std.posix.prctl(std.os.linux.PR.SET_NO_NEW_PRIVS, .{ 1, 0, 0, 0 });
 
     const abi = getABIVersion();
 
-    const effective_config = config;
     if (abi < 4) {
         std.log.err("Landlock ABI version 4+ required; got {}", .{abi});
         return error.UnsupportedABI;
@@ -90,18 +89,11 @@ pub fn setup(config: LandlockConfig) !void {
     defer _ = c.close(ruleset_fd);
 
     // Add filesystem rules
-    for (effective_config.allowed_paths) |path| {
+    for (allowed_paths) |path| {
         try addFilesystemRule(ruleset_fd, path, c.LANDLOCK_ACCESS_FS_READ_FILE | c.LANDLOCK_ACCESS_FS_READ_DIR);
     }
 
     // Apply restrictions
     try restrictSelf(ruleset_fd);
     std.log.info("Landlock restrictions applied successfully", .{});
-}
-
-pub fn setupWithPath(db_path: []const u8) !void {
-    const config = LandlockConfig{
-        .allowed_paths = &.{db_path},
-    };
-    try setup(config);
 }

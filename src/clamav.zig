@@ -81,17 +81,6 @@ pub const ClamAV = struct {
         }
     }
 
-    /// Scan a file by path for viruses
-    pub fn scanFile(self: Self, file_path: []const u8) !?[]const u8 {
-        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
-            std.log.err("Failed to open file '{s}': {}", .{ file_path, err });
-            return ClamAVError.ScanFailed;
-        };
-        defer file.close();
-
-        return self.scanFd(file.handle, file_path);
-    }
-
     /// Clean up and free the ClamAV engine
     pub fn deinit(self: Self) void {
         _ = libclamav.cl_engine_free(self.engine);

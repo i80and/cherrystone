@@ -31,7 +31,7 @@ pub const PidFdGetFdError = error{
 } || std.posix.UnexpectedError;
 
 pub fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: c_uint) PidFdGetFdError!c_int {
-    const rc = c.syscall(c.__NR_pidfd_open, pidfd, targetfd, flags);
+    const rc = c.syscall(c.__NR_pidfd_getfd, pidfd, targetfd, flags);
     switch (std.posix.errno(rc)) {
         .SUCCESS => return @intCast(rc),
         .BADF => return error.InvalidArgument,
