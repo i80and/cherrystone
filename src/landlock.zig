@@ -20,12 +20,12 @@ pub const LandlockConfig = struct {
     allowed_paths: []const []const u8 = &.{},
 };
 
-fn landlockCreateRuleset(attr: ?*const c.landlock_ruleset_attr, size: usize, flags: u32) c_int {
-    return @as(c_int, @intCast(c.syscall(c.__NR_landlock_create_ruleset, attr, @as(c_ulong, size), @as(c_ulong, flags))));
+fn landlock_create_ruleset(attr: ?*const c.landlock_ruleset_attr, size: usize, flags: u32) c_int {
+    return @intCast(c.syscall(c.__NR_landlock_create_ruleset, attr, size, flags));
 }
 
 pub fn getABIVersion() c_int {
-    return landlockCreateRuleset(null, 0, c.LANDLOCK_CREATE_RULESET_VERSION);
+    return landlock_create_ruleset(null, 0, c.LANDLOCK_CREATE_RULESET_VERSION);
 }
 
 fn addFilesystemRule(ruleset_fd: c_int, path: []const u8, access: u64) !void {
@@ -82,7 +82,7 @@ pub fn setup(config: LandlockConfig) !void {
         .handled_access_net = c.LANDLOCK_ACCESS_NET_BIND_TCP | c.LANDLOCK_ACCESS_NET_CONNECT_TCP,
     };
 
-    const ruleset_fd = landlockCreateRuleset(&ruleset_attr, @sizeOf(@TypeOf(ruleset_attr)), 0);
+    const ruleset_fd = landlock_create_ruleset(&ruleset_attr, @sizeOf(@TypeOf(ruleset_attr)), 0);
     if (ruleset_fd < 0) {
         std.log.err("Failed to create Landlock ruleset", .{});
         return LandlockError.LandlockRulesetFailed;

@@ -1,51 +1,8 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("sys/syscall.h");
-    @cInclude("unistd.h");
-});
+const syscalls = @import("syscalls.zig");
 const clamav = @import("clamav.zig");
 const ipc = @import("ipc.zig");
 const landlock = @import("landlock.zig");
-
-const PidFdOpenError = error{
-    InvalidArgument,
-    SystemResources,
-    UnsupportedKernel,
-} || std.posix.UnexpectedError;
-
-fn pidfd_open(pid: std.posix.pid_t, flags: c_uint) PidFdOpenError!c_int {
-    const rc = c.syscall(c.__NR_pidfd_open, pid, flags);
-    switch (std.posix.errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .INVAL => return error.InvalidArgument,
-        .MFILE => return error.SystemResources,
-        .NFILE => return error.SystemResources,
-        .NOMEM => return error.UnsupportedKernel,
-        .SRCH => return error.SystemResources,
-        else => |err| return std.posix.unexpectedErrno(err),
-    }
-}
-
-const PidFdGetFdError = error{
-    InvalidArgument,
-    SystemResources,
-    ProcessLacksPermissions,
-    ProcessDoesNotExist,
-} || std.posix.UnexpectedError;
-
-fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: c_uint) PidFdGetFdError!c_int {
-    const rc = c.syscall(c.__NR_pidfd_open, pidfd, targetfd, flags);
-    switch (std.posix.errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .BADF => return error.InvalidArgument,
-        .INVAL => return error.InvalidArgument,
-        .MFILE => return error.SystemResources,
-        .NFILE => return error.SystemResources,
-        .PERM => return error.ProcessLacksPermissions,
-        .SRCH => return error.SystemResources,
-        else => |err| return std.posix.unexpectedErrno(err),
-    }
-}
 
 fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
     // Initialize ClamAV library
@@ -62,10 +19,10 @@ fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
     const file = std.fs.File{ .handle = socket_fd };
     defer file.close();
 
-    const parent_pidfd = try pidfd_open(parent_pid, 0);
+    const parent_pidfd = try syscalls.pidfd_open(parent_pid, 0);
     defer std.posix.close(parent_pidfd);
 
-    const p = try pidfd_getfd(parent_pidfd, 0, 0);
+    const p = try syscalls.pidfd_getfd(parent_pidfd, 0, 0);
     std.log.info("PID: {}", .{p});
 
     // Simple echo for demonstration
@@ -77,10 +34,7 @@ fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
     }
 
     std.log.info("Scanning file using new ClamAV object...", .{});
-    const scan_result = scanner.scanFile("build.zig") catch |err| {
-        std.log.err("Failed to scan file: {}", .{err});
-        return;
-    };
+    const scan_result = try scanner.scanFile("clamav-testfile");
 
     if (scan_result) |virus_name| {
         std.log.warn("VIRUS DETECTED: {s}", .{virus_name});
