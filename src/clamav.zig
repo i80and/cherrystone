@@ -1,53 +1,99 @@
 const std = @import("std");
 const libclamav = @cImport(@cInclude("clamav.h"));
 
-pub fn init() !void {
-    if (libclamav.cl_init(libclamav.CL_INIT_DEFAULT) != libclamav.CL_SUCCESS) {
-        std.log.err("Failed to initialize ClamAV", .{});
-        return error.InitializationFailed;
-    }
-}
+pub const ClamAVError = error{
+    InitializationFailed,
+    EngineCreateFailed,
+    DatabaseLoadFailed,
+    EngineCompileFailed,
+    ScanFailed,
+};
 
-pub fn getDefaultDatabasePath() ![]const u8 {
-    const db_dir = libclamav.cl_retdbdir();
-    if (db_dir == null) {
-        std.log.err("Failed to get ClamAV database directory", .{});
-        return error.DatabaseDirFailed;
-    }
+pub const ClamAV = struct {
+    engine: *libclamav.struct_cl_engine,
 
-    // Convert C string to Zig slice
-    const db_path = std.mem.span(db_dir);
+    const Self = @This();
 
-    return db_path;
-}
-
-pub fn setupClamAV(db_path: []const u8) !*libclamav.struct_cl_engine {
-    // Get ClamAV database directory before applying restrictions
-    const db_dir = libclamav.cl_retdbdir();
-    if (db_dir == null) {
-        std.log.err("Failed to get ClamAV database directory", .{});
-        return error.DatabaseDirFailed;
+    /// Initialize libclamav (must be called before calling any other functions)
+    pub fn init() !void {
+        if (libclamav.cl_init(libclamav.CL_INIT_DEFAULT) != libclamav.CL_SUCCESS) {
+            std.log.err("Failed to initialize ClamAV", .{});
+            return ClamAVError.InitializationFailed;
+        }
     }
 
-    // Continue with ClamAV setup (this should still work as we allowed filesystem access)
-    const engine = libclamav.cl_engine_new() orelse {
-        std.log.err("Failed to create ClamAV engine", .{});
-        return error.EngineCreateFailed;
-    };
-
-    if (libclamav.cl_load(db_path.ptr, engine, null, libclamav.CL_DB_STDOPT | libclamav.CL_DB_PUA | libclamav.CL_DB_OFFICIAL_ONLY) != libclamav.CL_SUCCESS) {
-        std.log.err("Failed to load ClamAV database", .{});
-        return error.DatabaseLoadFailed;
+    /// Get the default ClamAV database path
+    pub fn getDefaultDatabasePath() []const u8 {
+        return std.mem.span(libclamav.cl_retdbdir());
     }
 
-    if (libclamav.cl_engine_compile(engine) != libclamav.CL_SUCCESS) {
-        std.log.err("Failed to compile ClamAV engine", .{});
-        return error.EngineCompileFailed;
+    /// Create a new ClamAV instance with the specified database path
+    pub fn create(db_path: []const u8) !Self {
+        // Create ClamAV engine
+        const engine = libclamav.cl_engine_new() orelse {
+            std.log.err("Failed to create ClamAV engine", .{});
+            return ClamAVError.EngineCreateFailed;
+        };
+
+        // Load the database
+        if (libclamav.cl_load(db_path.ptr, engine, null, libclamav.CL_DB_STDOPT | libclamav.CL_DB_PUA | libclamav.CL_DB_OFFICIAL_ONLY) != libclamav.CL_SUCCESS) {
+            std.log.err("Failed to load ClamAV database", .{});
+            _ = libclamav.cl_engine_free(engine);
+            return ClamAVError.DatabaseLoadFailed;
+        }
+
+        // Compile the engine
+        if (libclamav.cl_engine_compile(engine) != libclamav.CL_SUCCESS) {
+            std.log.err("Failed to compile ClamAV engine", .{});
+            _ = libclamav.cl_engine_free(engine);
+            return ClamAVError.EngineCompileFailed;
+        }
+
+        return Self{
+            .engine = engine,
+        };
     }
 
-    return engine;
-}
+    /// Scan a file descriptor for viruses
+    pub fn scanFd(self: Self, descriptor: c_int, filename: []const u8) !?[]const u8 {
+        var options = std.mem.zeroInit(libclamav.cl_scan_options, .{
+            .general = libclamav.CL_SCAN_GENERAL_ALLMATCHES | libclamav.CL_SCAN_GENERAL_HEURISTICS,
+            .parse = ~@as(u32, 0),
+            .heuristic = libclamav.CL_SCAN_GENERAL_HEURISTIC_PRECEDENCE,
+            .mail = 0,
+            .dev = 0,
+        });
 
-pub fn freeClamAV(engine: *libclamav.struct_cl_engine) void {
-    _ = libclamav.cl_engine_free(engine);
-}
+        var virus_name: [*c]const u8 = null;
+        const status = libclamav.cl_scandesc(descriptor, filename.ptr, &virus_name, null, self.engine, &options);
+
+        switch (status) {
+            libclamav.CL_VIRUS => {
+                return std.mem.span(virus_name);
+            },
+            libclamav.CL_CLEAN => {
+                return null;
+            },
+            else => {
+                std.log.err("Failed to scan file", .{});
+                return ClamAVError.ScanFailed;
+            },
+        }
+    }
+
+    /// Scan a file by path for viruses
+    pub fn scanFile(self: Self, file_path: []const u8) !?[]const u8 {
+        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+            std.log.err("Failed to open file '{s}': {}", .{ file_path, err });
+            return ClamAVError.ScanFailed;
+        };
+        defer file.close();
+
+        return self.scanFd(file.handle, file_path);
+    }
+
+    /// Clean up and free the ClamAV engine
+    pub fn deinit(self: Self) void {
+        _ = libclamav.cl_engine_free(self.engine);
+    }
+};

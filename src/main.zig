@@ -48,10 +48,16 @@ fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: c_uint) PidFdGetFdError!c_i
 }
 
 fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
-    try clamav.init();
-    const db_dir = try clamav.getDefaultDatabasePath();
+    // Initialize ClamAV library
+    try clamav.ClamAV.init();
+
+    // Get database directory and setup landlock
+    const db_dir = clamav.ClamAV.getDefaultDatabasePath();
     try landlock.setupWithPath(db_dir);
-    const engine = try clamav.setupClamAV(db_dir);
+
+    // Create ClamAV scanner instance using the new object-oriented interface
+    var scanner = try clamav.ClamAV.create(db_dir);
+    defer scanner.deinit();
 
     const file = std.fs.File{ .handle = socket_fd };
     defer file.close();
@@ -70,7 +76,17 @@ fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
         _ = try file.write("ACK from child");
     }
 
-    _ = clamav.freeClamAV(engine);
+    std.log.info("Scanning file using new ClamAV object...", .{});
+    const scan_result = scanner.scanFile("build.zig") catch |err| {
+        std.log.err("Failed to scan file: {}", .{err});
+        return;
+    };
+
+    if (scan_result) |virus_name| {
+        std.log.warn("VIRUS DETECTED: {s}", .{virus_name});
+    } else {
+        std.log.info("File is clean!", .{});
+    }
 }
 
 fn parentProcess(socket_fd: c_int) !void {
