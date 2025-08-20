@@ -3,6 +3,7 @@ const syscalls = @import("syscalls.zig");
 const ipc = @import("ipc.zig");
 const clamav = @import("clamav.zig");
 const landlock = @import("landlock.zig");
+const socket_utils = @import("socket_utils.zig");
 
 pub fn run(socket_fd: c_int, parent_pidfd: c_int) !void {
     // libclamav wants to create temporary files, which... ugh, fine. We have to let it.

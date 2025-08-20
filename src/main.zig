@@ -5,7 +5,7 @@ const syscalls = @import("syscalls.zig");
 
 pub fn main() !void {
     var sockets: [2]c_int = undefined;
-    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) {
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.DGRAM, 0, &sockets) != 0) {
         std.log.err("Failed to create socketpair", .{});
         return error.SocketPairFailed;
     }

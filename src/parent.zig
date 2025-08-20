@@ -1,6 +1,7 @@
 const std = @import("std");
 const ipc = @import("ipc.zig");
 const landlock = @import("landlock.zig");
+const socket_utils = @import("socket_utils.zig");
 
 pub fn run(socket_fd: c_int) !void {
     try landlock.setup(&.{"/"});
@@ -10,6 +11,9 @@ pub fn run(socket_fd: c_int) !void {
     defer ipc_file.close();
 
     {
+        try socket_utils.sendMessage(ipc_file.handle, "", null);
+        try socket_utils.recvMessage(ipc_file.handle);
+
         const f = try std.fs.cwd().openFile("clamav-testfile", .{});
         // defer f.close();
         const files = [_]ipc.FileDescription{.{ .path = "clamav-testfile", .fd = f.handle }};
