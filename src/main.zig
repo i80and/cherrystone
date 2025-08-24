@@ -51,9 +51,12 @@ fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
     // Initialize ClamAV library
     try clamav.ClamAV.init();
 
+    // Zig demands being able to work in $TMPDIR. Sigh.
+    const tmpdir = std.posix.getenv("TMPDIR") orelse "/tmp/";
+
     // Get database directory and setup landlock
     const db_dir = clamav.ClamAV.getDefaultDatabasePath();
-    try landlock.setupWithPath(db_dir);
+    try landlock.setup(&.{db_dir, tmpdir});
 
     // Create ClamAV scanner instance using the new object-oriented interface
     var scanner = try clamav.ClamAV.create(db_dir);
@@ -90,7 +93,7 @@ fn childProcess(socket_fd: c_int, parent_pid: i32) !void {
 }
 
 fn parentProcess(socket_fd: c_int) !void {
-    try landlock.setupWithPath("/");
+    try landlock.setup(&.{"/"});
 
     // Use inherited socket for communication
     const file = std.fs.File{ .handle = socket_fd };
