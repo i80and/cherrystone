@@ -33,6 +33,9 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    exe.addCSourceFile(.{ .file = .{ .src_path = .{ .owner = b, .sub_path = "./src/ipc.c" } } });
+    exe.addIncludePath(b.path("src"));
+
     exe.linkLibC();
     // Link against libclamav
     exe.linkSystemLibrary("clamav");
