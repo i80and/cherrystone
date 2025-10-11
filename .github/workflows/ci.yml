@@ -24,3 +24,4 @@ jobs:
       - name: Install dependencies
         run: sudo apt install -y libclamav-dev
       - run: zig build
+      - run: zig build test
