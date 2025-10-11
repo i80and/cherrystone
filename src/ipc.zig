@@ -10,6 +10,8 @@ const IPC_ERROR_SOCKET: c_int = c.IPC_ERROR_SOCKET;
 const IPC_ERROR_PROTOCOL: c_int = c.IPC_ERROR_PROTOCOL;
 const IPC_ERROR_BUFFER: c_int = c.IPC_ERROR_BUFFER;
 
+pub const MAX_FDS = c.MAX_FDS;
+
 // Public error type for IPC operations
 pub const IpcError = error{
     SocketError,
@@ -28,54 +30,77 @@ fn cErrorToZigError(err: isize) IpcError {
     };
 }
 
-/// Read a message along with an associated sequence of FDs into a provided buffer.
-/// The socket should be opened std.os.unix.AF.UNIX, std.posix.SOCK.SEQPACKET
-pub fn readMessage(socket_fd: std.posix.fd_t, msg_buffer: []u8, fds_buffer: []std.posix.fd_t) IpcError!struct { []u8, []std.posix.fd_t } {
-    var fds_count: usize = 0;
-    const result = c.readMessage(socket_fd, msg_buffer.ptr, msg_buffer.len, fds_buffer.ptr, fds_buffer.len, &fds_count);
-    if (result < 0) {
-        return cErrorToZigError(result);
+/// IPC class that manages a UNIX domain socket with SEQPACKET protocol
+pub const IPC = struct {
+    socket_fd: std.posix.fd_t,
+
+    /// Create an IPC instance with a new socket pair
+    /// Returns both ends of the socket pair
+    pub fn createSocketPair() !struct { IPC, IPC } {
+        var sockets: [2]c_int = undefined;
+        const result = c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.SEQPACKET, 0, &sockets);
+        if (result != 0) {
+            return IpcError.SocketError;
+        }
+
+        const ipc_a = IPC{
+            .socket_fd = sockets[0],
+        };
+
+        const ipc_b = IPC{
+            .socket_fd = sockets[1],
+        };
+
+        return .{ ipc_a, ipc_b };
     }
 
-    return struct { []u8, []std.posix.fd_t }{
-        msg_buffer[0..@as(usize, @intCast(result))],
-        fds_buffer[0..fds_count],
-    };
-}
-
-/// Write a message along with an associated sequence of FDs.
-/// The socket should be opened std.os.unix.AF.UNIX, std.posix.SOCK.SEQPACKET
-pub fn writeMessage(socket_fd: std.posix.fd_t, msg: []const u8, fds: []const std.posix.fd_t) IpcError!void {
-    const result = c.writeMessage(socket_fd, @ptrCast(@constCast(msg.ptr)), msg.len, @ptrCast(@constCast(fds.ptr)), fds.len);
-    if (result != 0) {
-        return cErrorToZigError(result);
+    /// Clean up the socket if owned by this instance
+    pub fn deinit(self: *IPC) void {
+        _ = c.close(self.socket_fd);
+        self.socket_fd = -1;
     }
 
-    return;
-}
+    /// Read a message along with an associated sequence of FDs into a provided buffer
+    pub fn readMessage(self: *const IPC, msg_buffer: []u8, fds_buffer: []std.posix.fd_t) IpcError!struct { []u8, []std.posix.fd_t } {
+        var fds_count: usize = 0;
+        const result = c.readMessage(self.socket_fd, msg_buffer.ptr, msg_buffer.len, fds_buffer.ptr, fds_buffer.len, &fds_count);
+        if (result < 0) {
+            return cErrorToZigError(result);
+        }
+
+        return struct { []u8, []std.posix.fd_t }{
+            msg_buffer[0..@as(usize, @intCast(result))],
+            fds_buffer[0..fds_count],
+        };
+    }
+
+    /// Write a message along with an associated sequence of FDs
+    pub fn writeMessage(self: *const IPC, msg: []const u8, fds: []const std.posix.fd_t) IpcError!void {
+        const result = c.writeMessage(self.socket_fd, @ptrCast(@constCast(msg.ptr)), msg.len, @ptrCast(@constCast(fds.ptr)), fds.len);
+        if (result != 0) {
+            return cErrorToZigError(result);
+        }
+    }
+};
 
 // Tests
 // Test helper functions
 /// Builds a socket pair
 const TestSocketPair = struct {
-    socket_a: c_int,
-    socket_b: c_int,
+    ipc_a: IPC,
+    ipc_b: IPC,
 
     fn init() !TestSocketPair {
-        var sockets: [2]c_int = undefined;
-        const result = c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.SEQPACKET, 0, &sockets);
-        if (result != 0) {
-            return error.SocketError;
-        }
+        const pair = try IPC.createSocketPair();
         return TestSocketPair{
-            .socket_a = sockets[0],
-            .socket_b = sockets[1],
+            .ipc_a = pair[0],
+            .ipc_b = pair[1],
         };
     }
 
-    fn deinit(self: TestSocketPair) void {
-        _ = c.close(self.socket_a);
-        _ = c.close(self.socket_b);
+    fn deinit(self: *TestSocketPair) void {
+        self.ipc_a.deinit();
+        self.ipc_b.deinit();
     }
 };
 
@@ -130,17 +155,17 @@ test "Error code conversion" {
 
 test "Empty message handling" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const msg = "";
     const fds: []const c_int = &.{};
 
-    try writeMessage(sockets.socket_a, msg, fds);
+    try sockets.ipc_a.writeMessage(msg, fds);
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
 
     try testing.expect(read_result[0].len == 0);
     try testing.expect(read_result[1].len == 0);
@@ -148,7 +173,7 @@ test "Empty message handling" {
 
 test "Empty message with fds handling" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const pipe = try TestPipe.init();
@@ -157,11 +182,11 @@ test "Empty message with fds handling" {
     const msg = "";
     const one_fd = &[_]c_int{pipe.read_fd};
 
-    try writeMessage(sockets.socket_a, msg, one_fd);
+    try sockets.ipc_a.writeMessage(msg, one_fd);
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
 
     try testing.expect(read_result[0].len == 0);
     try testing.expect(read_result[1].len == 1);
@@ -169,17 +194,17 @@ test "Empty message with fds handling" {
 
 test "Basic message passing without file descriptors" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const msg = "ping no fds";
     const no_fds: []const c_int = &.{};
 
-    try writeMessage(sockets.socket_a, msg, no_fds);
+    try sockets.ipc_a.writeMessage(msg, no_fds);
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
 
     try testing.expectEqualSlices(u8, msg, read_result[0]);
     try testing.expect(read_result[1].len == 0);
@@ -187,7 +212,7 @@ test "Basic message passing without file descriptors" {
 
 test "Single file descriptor passing" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const pipe = try TestPipe.init();
@@ -196,11 +221,11 @@ test "Single file descriptor passing" {
     const msg = "ping one fd";
     const one_fd = &[_]c_int{pipe.read_fd};
 
-    try writeMessage(sockets.socket_a, msg, one_fd);
+    try sockets.ipc_a.writeMessage(msg, one_fd);
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
 
     try testing.expectEqualSlices(u8, msg, read_result[0]);
     try testing.expect(read_result[1].len == 1);
@@ -211,7 +236,7 @@ test "Single file descriptor passing" {
 
 test "Multiple file descriptor passing" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const pipes = try createMultiplePipes(2);
@@ -226,11 +251,11 @@ test "Multiple file descriptor passing" {
     const write_result = c.write(pipes[0].write_fd, test_data.ptr, test_data.len);
     try testing.expect(write_result == test_data.len);
 
-    try writeMessage(sockets.socket_a, msg, two_fds);
+    try sockets.ipc_a.writeMessage(msg, two_fds);
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
 
     try testing.expectEqualSlices(u8, msg, read_result[0]);
     try testing.expect(read_result[1].len == 2);
@@ -247,76 +272,76 @@ test "Multiple file descriptor passing" {
 
 test "Maximum allowed file descriptors" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const msg = "ping max fds";
 
     // Create MAX_FDS pipes for testing
-    var pipes: [c.MAX_FDS][2]c_int = undefined;
-    var max_fds: [c.MAX_FDS]c_int = undefined;
+    var pipes: [MAX_FDS][2]c_int = undefined;
+    var max_fds: [MAX_FDS]c_int = undefined;
 
-    for (0..c.MAX_FDS) |i| {
+    for (0..MAX_FDS) |i| {
         if (c.pipe(&pipes[i]) != 0) {
             return error.PipeError;
         }
         max_fds[i] = pipes[i][0];
     }
     defer {
-        for (0..c.MAX_FDS) |i| {
+        for (0..MAX_FDS) |i| {
             _ = c.close(pipes[i][0]);
             _ = c.close(pipes[i][1]);
         }
     }
 
-    try writeMessage(sockets.socket_a, msg, &max_fds);
+    try sockets.ipc_a.writeMessage(msg, &max_fds);
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
 
     try testing.expectEqualSlices(u8, msg, read_result[0]);
-    try testing.expect(read_result[1].len == c.MAX_FDS);
+    try testing.expect(read_result[1].len == MAX_FDS);
 
     closeFds(read_result[1]);
 }
 
 test "Excess file descriptors are closed on receipt" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const msg = "ping max fds with small read buffer";
 
     // Create MAX_FDS pipes for testing
-    var pipes: [c.MAX_FDS][2]c_int = undefined;
-    var max_fds: [c.MAX_FDS]c_int = undefined;
+    var pipes: [MAX_FDS][2]c_int = undefined;
+    var max_fds: [MAX_FDS]c_int = undefined;
 
-    for (0..c.MAX_FDS) |i| {
+    for (0..MAX_FDS) |i| {
         if (c.pipe(&pipes[i]) != 0) {
             return error.PipeError;
         }
         max_fds[i] = pipes[i][0];
     }
     defer {
-        for (0..c.MAX_FDS) |i| {
+        for (0..MAX_FDS) |i| {
             _ = c.close(pipes[i][0]);
             _ = c.close(pipes[i][1]);
         }
     }
 
     // Successfully send MAX_FDS file descriptors
-    try writeMessage(sockets.socket_a, msg, &max_fds);
+    try sockets.ipc_a.writeMessage(msg, &max_fds);
 
     // Try to read into a smaller buffer (MAX_FDS - 1)
     // The excess fd should be automatically closed by the C implementation
     var msg_buffer: [1024]u8 = undefined;
-    var small_fds_buffer: [c.MAX_FDS - 1]c_int = undefined;
-    const read_result = try readMessage(sockets.socket_b, &msg_buffer, &small_fds_buffer);
+    var small_fds_buffer: [MAX_FDS - 1]c_int = undefined;
+    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &small_fds_buffer);
 
     try testing.expectEqualSlices(u8, msg, read_result[0]);
     // Should only receive MAX_FDS - 1 fds, the excess one is closed automatically
-    try testing.expect(read_result[1].len == c.MAX_FDS - 1);
+    try testing.expect(read_result[1].len == MAX_FDS - 1);
 
     closeFds(read_result[1]);
 
@@ -326,69 +351,69 @@ test "Excess file descriptors are closed on receipt" {
 
 test "Error when sending too many file descriptors" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const msg = "ping too many fds";
 
     // Create MAX_FDS + 1 pipes for testing
-    var pipes: [c.MAX_FDS + 1][2]c_int = undefined;
-    var too_many_fds: [c.MAX_FDS + 1]c_int = undefined;
+    var pipes: [MAX_FDS + 1][2]c_int = undefined;
+    var too_many_fds: [MAX_FDS + 1]c_int = undefined;
 
-    for (0..c.MAX_FDS + 1) |i| {
+    for (0..MAX_FDS + 1) |i| {
         if (c.pipe(&pipes[i]) != 0) {
             return error.PipeError;
         }
         too_many_fds[i] = pipes[i][0];
     }
     defer {
-        for (0..c.MAX_FDS + 1) |i| {
+        for (0..MAX_FDS + 1) |i| {
             _ = c.close(pipes[i][0]);
             _ = c.close(pipes[i][1]);
         }
     }
 
     // Should get an error when trying to send too many fds
-    const write_result = writeMessage(sockets.socket_a, msg, &too_many_fds);
+    const write_result = sockets.ipc_a.writeMessage(msg, &too_many_fds);
     try testing.expectError(IpcError.BufferTooSmall, write_result);
 }
 
 test "Bidirectional ping-pong with file descriptor forwarding" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
-
-    const ping_msg = "ping";
-    const pong_msg = "pong";
 
     const pipe = try TestPipe.init();
     defer pipe.deinit();
 
-    // Send ping from A to B with fd
+    // Send ping from A to B
+    const ping_msg = "ping";
     const ping_fds = &[_]c_int{pipe.read_fd};
-    try writeMessage(sockets.socket_a, ping_msg, ping_fds);
+    try sockets.ipc_a.writeMessage(ping_msg, ping_fds);
 
-    // Receive ping at B
+    // Receive ping on B
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    var read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    var read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, ping_msg, read_result[0]);
     try testing.expect(read_result[1].len == 1);
 
-    // Send pong back from B to A with received fd
-    try writeMessage(sockets.socket_b, pong_msg, read_result[1]);
+    // Send pong from B to A with the forwarded fd
+    const pong_msg = "pong";
+    try sockets.ipc_b.writeMessage(pong_msg, read_result[1]);
 
-    // Receive pong at A
-    read_result = try readMessage(sockets.socket_a, &msg_buffer, &fds_buffer);
+    // Receive pong on A
+    read_result = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, pong_msg, read_result[0]);
     try testing.expect(read_result[1].len == 1);
 
+    // Close all the received fds
     closeFds(read_result[1]);
 }
 
 test "Basic acknowledgment message protocol" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     const request_msg = "REQUEST: process this data";
@@ -399,38 +424,38 @@ test "Basic acknowledgment message protocol" {
 
     // Step 1: Send request from A to B with fd
     const request_fds = &[_]c_int{pipe.read_fd};
-    try writeMessage(sockets.socket_a, request_msg, request_fds);
+    try sockets.ipc_a.writeMessage(request_msg, request_fds);
 
     // Step 2: Receive request at B
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
-    var read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    var fds_buffer: [MAX_FDS]c_int = undefined;
+    var read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, request_msg, read_result[0]);
     try testing.expect(read_result[1].len == 1);
 
     // Step 3: Send ACK back from B to A (no fds needed for ACK)
     const no_fds: []const c_int = &.{};
-    try writeMessage(sockets.socket_b, ack_msg, no_fds);
+    try sockets.ipc_b.writeMessage(ack_msg, no_fds);
 
     // Step 4: Receive ACK at A
-    read_result = try readMessage(sockets.socket_a, &msg_buffer, &fds_buffer);
+    read_result = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, ack_msg, read_result[0]);
     try testing.expect(read_result[1].len == 0);
 
     // Step 5: Send another request from A to B (different message)
     const request_msg2 = "REQUEST: second operation";
-    try writeMessage(sockets.socket_a, request_msg2, request_fds);
+    try sockets.ipc_a.writeMessage(request_msg2, request_fds);
 
     // Step 6: Receive second request at B
-    read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+    read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, request_msg2, read_result[0]);
     try testing.expect(read_result[1].len == 1);
 
     // Step 7: Send ACK with received fd back from B to A
-    try writeMessage(sockets.socket_b, ack_msg, read_result[1]);
+    try sockets.ipc_b.writeMessage(ack_msg, read_result[1]);
 
     // Step 8: Receive ACK with fd at A
-    read_result = try readMessage(sockets.socket_a, &msg_buffer, &fds_buffer);
+    read_result = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, ack_msg, read_result[0]);
     try testing.expect(read_result[1].len == 1);
 
@@ -439,7 +464,7 @@ test "Basic acknowledgment message protocol" {
 
 test "Multi-message client-server protocol simulation" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     // Simulate a realistic protocol where:
@@ -473,7 +498,7 @@ test "Multi-message client-server protocol simulation" {
     }
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
+    var fds_buffer: [MAX_FDS]c_int = undefined;
 
     // Process each command
     for (commands) |cmd| {
@@ -486,19 +511,19 @@ test "Multi-message client-server protocol simulation" {
             else => unreachable,
         }
 
-        try writeMessage(sockets.socket_a, cmd.msg, send_fds);
+        try sockets.ipc_a.writeMessage(cmd.msg, send_fds);
 
         // Server receives command
-        const read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
+        const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
         try testing.expectEqualSlices(u8, cmd.msg, read_result[0]);
         try testing.expect(read_result[1].len == cmd.fd_count);
 
         // Server sends ACK/NACK response
         const response_fds: []const c_int = if (cmd.fd_count > 0) read_result[1] else &.{};
-        try writeMessage(sockets.socket_b, cmd.expect_ack, response_fds);
+        try sockets.ipc_b.writeMessage(cmd.expect_ack, response_fds);
 
         // Client receives ACK/NACK
-        const ack_result = try readMessage(sockets.socket_a, &msg_buffer, &fds_buffer);
+        const ack_result = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
         try testing.expectEqualSlices(u8, cmd.expect_ack, ack_result[0]);
         try testing.expect(ack_result[1].len == cmd.fd_count);
 
@@ -509,7 +534,7 @@ test "Multi-message client-server protocol simulation" {
 
 test "Protocol error handling and socket state recovery" {
     const testing = std.testing;
-    const sockets = try TestSocketPair.init();
+    var sockets = try TestSocketPair.init();
     defer sockets.deinit();
 
     // Test various error conditions and socket state after failures
@@ -518,43 +543,85 @@ test "Protocol error handling and socket state recovery" {
     const ack_recovery = "ACK: recovered";
 
     var msg_buffer: [1024]u8 = undefined;
-    var fds_buffer: [c.MAX_FDS]c_int = undefined;
+    var fds_buffer: [MAX_FDS]c_int = undefined;
 
     // Send a command that might cause issues
     const no_fds: []const c_int = &.{};
-    try writeMessage(sockets.socket_a, error_msg, no_fds);
+    try sockets.ipc_a.writeMessage(error_msg, no_fds);
 
     // Receive command
-    var read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
-    try testing.expectEqualSlices(u8, error_msg, read_result[0]);
-    try testing.expect(read_result[1].len == 0);
+    const read_result1 = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
+    try testing.expectEqualSlices(u8, error_msg, read_result1[0]);
+    try testing.expect(read_result1[1].len == 0);
 
     // Server decides not to send ACK (simulating error condition)
     // Instead, send recovery command in opposite direction
-    try writeMessage(sockets.socket_b, recovery_msg, no_fds);
+    try sockets.ipc_b.writeMessage(recovery_msg, no_fds);
 
     // Client receives recovery command
-    read_result = try readMessage(sockets.socket_a, &msg_buffer, &fds_buffer);
-    try testing.expectEqualSlices(u8, recovery_msg, read_result[0]);
-    try testing.expect(read_result[1].len == 0);
+    const read_result2 = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
+    try testing.expectEqualSlices(u8, recovery_msg, read_result2[0]);
+    try testing.expect(read_result2[1].len == 0);
 
-    // Client sends ACK for recovery
-    try writeMessage(sockets.socket_a, ack_recovery, no_fds);
+    // Client sends recovery ACK
+    try sockets.ipc_a.writeMessage(ack_recovery, no_fds);
 
     // Server receives recovery ACK
-    read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
-    try testing.expectEqualSlices(u8, ack_recovery, read_result[0]);
-    try testing.expect(read_result[1].len == 0);
+    const read_result3 = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
+    try testing.expectEqualSlices(u8, ack_recovery, read_result3[0]);
+    try testing.expect(read_result3[1].len == 0);
 
     // Verify socket is still functional with normal ping-pong
     const final_ping = "final ping";
     const final_pong = "final pong";
 
-    try writeMessage(sockets.socket_a, final_ping, no_fds);
-    read_result = try readMessage(sockets.socket_b, &msg_buffer, &fds_buffer);
-    try testing.expectEqualSlices(u8, final_ping, read_result[0]);
+    try sockets.ipc_a.writeMessage(final_ping, no_fds);
+    var final_result = try sockets.ipc_b.readMessage(&msg_buffer, &fds_buffer);
+    try testing.expectEqualSlices(u8, final_ping, final_result[0]);
 
-    try writeMessage(sockets.socket_b, final_pong, no_fds);
-    read_result = try readMessage(sockets.socket_a, &msg_buffer, &fds_buffer);
-    try testing.expectEqualSlices(u8, final_pong, read_result[0]);
+    try sockets.ipc_b.writeMessage(final_pong, no_fds);
+    final_result = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
+    try testing.expectEqualSlices(u8, final_pong, final_result[0]);
 }
+
+// /// Example demonstrating the new IPC class usage
+// /// This shows how to create socket pairs, connect to sockets, and use the class methods
+// pub fn example() !void {
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     const allocator = gpa.allocator();
+
+//     // Example 1: Create a socket pair for inter-process communication
+//     const socket_pair = try IPC.createSocketPair();
+//     var ipc_a = socket_pair[0];
+//     var ipc_b = socket_pair[1];
+//     defer ipc_a.deinit();
+//     defer ipc_b.deinit();
+
+//     // Send a message from A to B
+//     const message = "Hello from IPC A!";
+//     const no_fds: []const std.posix.fd_t = &.{};
+//     try ipc_a.writeMessage(message, no_fds);
+
+//     // Read the message on B
+//     var msg_buffer: [1024]u8 = undefined;
+//     var fds_buffer: [16]std.posix.fd_t = undefined;
+//     const result = try ipc_b.readMessage(&msg_buffer, &fds_buffer);
+
+//     std.debug.print("Received message: {s}\n", .{result[0]});
+
+//     // Example 2: Connect to a UNIX domain socket (if it exists)
+//     // Note: This would typically be used to connect to an existing socket
+//     // var ipc_client = try IPC.connect("/tmp/example.sock", allocator);
+//     // defer ipc_client.deinit();
+
+//     // Example 3: Bind to a UNIX domain socket for listening
+//     // Note: This would typically be used in a server application
+//     // var ipc_server = try IPC.bind("/tmp/server.sock", allocator);
+//     // defer ipc_server.deinit();
+
+//     // Example 4: Use existing socket with fromSocket
+//     // This is useful when you already have a socket file descriptor
+//     // const existing_ipc = IPC.fromSocket(some_fd);
+//     // Note: fromSocket doesn't own the socket, so no deinit needed
+// }

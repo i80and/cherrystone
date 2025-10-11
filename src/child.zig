@@ -3,7 +3,9 @@ const clamav = @import("clamav.zig");
 const landlock = @import("landlock.zig");
 const ipc = @import("ipc.zig");
 
-pub fn run(socket_fd: c_int) !void {
+pub fn run(socket: *ipc.IPC) !void {
+    defer socket.deinit();
+
     // Initialize ClamAV library
     try clamav.ClamAV.init();
 
@@ -24,5 +26,5 @@ pub fn run(socket_fd: c_int) !void {
     const fds_buf = try std.heap.page_allocator.alloc(std.posix.fd_t, 20);
     defer std.heap.page_allocator.free(msg_buf);
 
-    _ = try ipc.readMessage(socket_fd, msg_buf, fds_buf);
+    _ = try socket.readMessage(msg_buf, fds_buf);
 }
