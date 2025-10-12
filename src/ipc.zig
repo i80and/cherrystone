@@ -61,15 +61,24 @@ pub const IPC = struct {
     }
 
     /// Read a message along with an associated sequence of FDs into a provided buffer
-    pub fn readMessage(self: *const IPC, msg_buffer: []u8, fds_buffer: []std.posix.fd_t) IpcError!struct { []u8, []std.posix.fd_t } {
+    pub fn readMessage(self: *const IPC, msg_buffer: []u8, fds_buffer: []std.posix.fd_t) IpcError!struct { [:0]u8, []std.posix.fd_t } {
         var fds_count: usize = 0;
-        const result = c.readMessage(self.socket_fd, msg_buffer.ptr, msg_buffer.len, fds_buffer.ptr, fds_buffer.len, &fds_count);
+
+        // Ensure the message buffer has at least one byte available for the null terminator
+        std.debug.assert(msg_buffer.len >= 1);
+
+        const result = c.readMessage(self.socket_fd, msg_buffer.ptr, msg_buffer.len - 1, fds_buffer.ptr, fds_buffer.len, &fds_count);
         if (result < 0) {
             return cErrorToZigError(result);
         }
 
-        return struct { []u8, []std.posix.fd_t }{
-            msg_buffer[0..@as(usize, @intCast(result))],
+        const resultUsize: usize = @intCast(result);
+
+        // Null-terminate the message buffer
+        msg_buffer[resultUsize] = 0;
+
+        return struct { [:0]u8, []std.posix.fd_t }{
+            msg_buffer[0..resultUsize :0],
             fds_buffer[0..fds_count],
         };
     }
@@ -583,45 +592,3 @@ test "Protocol error handling and socket state recovery" {
     final_result = try sockets.ipc_a.readMessage(&msg_buffer, &fds_buffer);
     try testing.expectEqualSlices(u8, final_pong, final_result[0]);
 }
-
-// /// Example demonstrating the new IPC class usage
-// /// This shows how to create socket pairs, connect to sockets, and use the class methods
-// pub fn example() !void {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     defer _ = gpa.deinit();
-//     const allocator = gpa.allocator();
-
-//     // Example 1: Create a socket pair for inter-process communication
-//     const socket_pair = try IPC.createSocketPair();
-//     var ipc_a = socket_pair[0];
-//     var ipc_b = socket_pair[1];
-//     defer ipc_a.deinit();
-//     defer ipc_b.deinit();
-
-//     // Send a message from A to B
-//     const message = "Hello from IPC A!";
-//     const no_fds: []const std.posix.fd_t = &.{};
-//     try ipc_a.writeMessage(message, no_fds);
-
-//     // Read the message on B
-//     var msg_buffer: [1024]u8 = undefined;
-//     var fds_buffer: [16]std.posix.fd_t = undefined;
-//     const result = try ipc_b.readMessage(&msg_buffer, &fds_buffer);
-
-//     std.debug.print("Received message: {s}\n", .{result[0]});
-
-//     // Example 2: Connect to a UNIX domain socket (if it exists)
-//     // Note: This would typically be used to connect to an existing socket
-//     // var ipc_client = try IPC.connect("/tmp/example.sock", allocator);
-//     // defer ipc_client.deinit();
-
-//     // Example 3: Bind to a UNIX domain socket for listening
-//     // Note: This would typically be used in a server application
-//     // var ipc_server = try IPC.bind("/tmp/server.sock", allocator);
-//     // defer ipc_server.deinit();
-
-//     // Example 4: Use existing socket with fromSocket
-//     // This is useful when you already have a socket file descriptor
-//     // const existing_ipc = IPC.fromSocket(some_fd);
-//     // Note: fromSocket doesn't own the socket, so no deinit needed
-// }
