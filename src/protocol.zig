@@ -1,8 +1,10 @@
 const std = @import("std");
 
+pub const VirusEntry = struct { index: u32, name: []const u8 };
+
 pub const EngineInfoResponse = struct { version: []const u8, num_signatures: u32 };
-pub const ScanFilesRequest = struct {};
-pub const ScanFilesResponse = struct {};
+pub const ScanFilesRequest = struct { files: []const []const u8 };
+pub const ScanFilesResponse = struct { detections: []const VirusEntry };
 
 pub const RequestTag = enum { engine_info, scan_files, exit };
 pub const Request = union(RequestTag) { engine_info: void, scan_files: ScanFilesRequest, exit: void };

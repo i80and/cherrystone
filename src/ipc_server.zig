@@ -49,9 +49,15 @@ pub const Server = struct {
             const obj = try protocol.deserialize(T, allocator, result[0]);
 
             const returnValue = try handle(context, T, allocator, &obj, result[1]);
+
+            // Close received file descriptors. Cave Johnson, we're done here.
+            for (result[1]) |fd| {
+                std.posix.close(fd);
+            }
+
             if (returnValue) |value| {
                 const serialized = try protocol.serialize(allocator, value);
-                std.debug.print("Sending: {s}\n", .{serialized});
+                std.log.debug("Sending: {s}", .{serialized});
                 try self.connection.writeMessage(serialized, &.{});
             }
         }
