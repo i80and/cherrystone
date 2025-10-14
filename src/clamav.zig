@@ -1,5 +1,6 @@
 const std = @import("std");
 const libclamav = @cImport(@cInclude("clamav.h"));
+const protocol = @import("protocol.zig");
 
 pub const ClamAVError = error{
     InitializationFailed,
@@ -11,6 +12,7 @@ pub const ClamAVError = error{
 
 pub const ClamAV = struct {
     engine: *libclamav.struct_cl_engine,
+    num_signatures: u32,
 
     const Self = @This();
 
@@ -27,6 +29,11 @@ pub const ClamAV = struct {
         return std.mem.span(libclamav.cl_retdbdir());
     }
 
+    /// Return the engine version string. Statically allocated.
+    pub fn getEngineVersionString() []const u8 {
+        return std.mem.span(libclamav.cl_retver());
+    }
+
     /// Create a new ClamAV instance with the specified database path
     pub fn create(db_path: []const u8) !Self {
         // Create ClamAV engine
@@ -36,7 +43,8 @@ pub const ClamAV = struct {
         };
 
         // Load the database
-        if (libclamav.cl_load(db_path.ptr, engine, null, libclamav.CL_DB_STDOPT | libclamav.CL_DB_PUA | libclamav.CL_DB_OFFICIAL_ONLY) != libclamav.CL_SUCCESS) {
+        var num_signatures: c_uint = 0;
+        if (libclamav.cl_load(db_path.ptr, engine, &num_signatures, libclamav.CL_DB_STDOPT | libclamav.CL_DB_PUA | libclamav.CL_DB_OFFICIAL_ONLY) != libclamav.CL_SUCCESS) {
             std.log.err("Failed to load ClamAV database", .{});
             _ = libclamav.cl_engine_free(engine);
             return ClamAVError.DatabaseLoadFailed;
@@ -51,6 +59,7 @@ pub const ClamAV = struct {
 
         return Self{
             .engine = engine,
+            .num_signatures = num_signatures,
         };
     }
 
