@@ -6,7 +6,20 @@
 #include <errno.h>
 #include <string.h>
 
-
+static void close_fds(struct msghdr* msg) {
+    struct cmsghdr* cmsg;
+    for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            // Calculate number of file descriptors received
+            size_t fd_count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            // Close excess file descriptors to prevent leaks
+            int* fds = (int*)CMSG_DATA(cmsg);
+            for (size_t i = 0; i < fd_count; i++) {
+                close(fds[i]);
+            }
+        }
+    }
+}
 
 ssize_t readMessage(int socket_fd,
     void* out_msg, size_t out_msg_size,
@@ -41,6 +54,7 @@ ssize_t readMessage(int socket_fd,
     } while (bytes_received == -1 && errno == EINTR);
 
     if (bytes_received <= 0 || (size_t)bytes_received < sizeof(size_t)) {
+        close_fds(&msg);
         return IPC_ERROR_SOCKET; // Socket error
     }
 
@@ -49,11 +63,15 @@ ssize_t readMessage(int socket_fd,
     memcpy(&msg_len, out_msg, sizeof(size_t));
 
     // Verify the message length makes sense
-    if (msg_len > out_msg_size - sizeof(size_t)) {
+    if ((msg_len > out_msg_size - sizeof(size_t))
+        || (msg.msg_flags & MSG_TRUNC)
+        || (msg.msg_flags & MSG_CTRUNC)) {
+        close_fds(&msg);
         return IPC_ERROR_BUFFER; // Buffer too small
     }
 
     if ((size_t)bytes_received != sizeof(size_t) + msg_len) {
+        close_fds(&msg);
         return IPC_ERROR_PROTOCOL; // Protocol error
     }
 
@@ -133,6 +151,7 @@ int writeMessage(int socket_fd, void* msg, size_t msg_count, int* fds, size_t fd
     // Send the message, retrying on EINTR
     ssize_t bytes_sent;
     do {
+        // We don't need to check for partial writes: the socket's opened SEQPACKET
         bytes_sent = sendmsg(socket_fd, &msghdr, 0);
     } while (bytes_sent == -1 && errno == EINTR);
 

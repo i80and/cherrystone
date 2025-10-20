@@ -15,6 +15,7 @@
 #define IPC_ERROR_PROTOCOL -2
 #define IPC_ERROR_BUFFER -3
 
+// Socket must be opened SEQPACKET
 // Return values:
 // IPC_SUCCESS: Success
 // IPC_ERROR_SOCKET: Socket error (check errno)
@@ -23,6 +24,7 @@
 ssize_t readMessage(int socket_fd,
     void* out_msg, size_t out_msg_size,
     int* out_fds, size_t out_fds_max, size_t* out_fds_count);
+// Socket must be opened SEQPACKET
 int writeMessage(int socket_fd, void* msg, size_t msg_count, int* fds, size_t fds_count);
 
 #endif
