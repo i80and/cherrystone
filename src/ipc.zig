@@ -346,16 +346,8 @@ test "Excess file descriptors are closed on receipt" {
     // The excess fd should be automatically closed by the C implementation
     var msg_buffer: [1024]u8 = undefined;
     var small_fds_buffer: [MAX_FDS - 1]c_int = undefined;
-    const read_result = try sockets.ipc_b.readMessage(&msg_buffer, &small_fds_buffer);
-
-    try testing.expectEqualSlices(u8, msg, read_result[0]);
-    // Should only receive MAX_FDS - 1 fds, the excess one is closed automatically
-    try testing.expect(read_result[1].len == MAX_FDS - 1);
-
-    closeFds(read_result[1]);
-
-    // Note: The excess fd (pipes[MAX_FDS-1][0]) is automatically closed by
-    // the C implementation in readMessage() to prevent fd leaks
+    const read_result = sockets.ipc_b.readMessage(&msg_buffer, &small_fds_buffer);
+    try testing.expectError(IpcError.BufferTooSmall, read_result);
 }
 
 test "Error when sending too many file descriptors" {

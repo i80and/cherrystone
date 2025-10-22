@@ -85,14 +85,12 @@ ssize_t readMessage(int socket_fd,
             // Calculate number of file descriptors received
             size_t fd_count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
 
-            // Limit to what we can store
+            // If we get more fds than we can store, close them all and error
+            // This isn't necessarily the ideal solution, but it's simple and
+            // the sender/receiver should contractually agree on a buffer size.
             if (fd_count > out_fds_max) {
-                // Close excess file descriptors to prevent leaks
-                int* fds = (int*)CMSG_DATA(cmsg);
-                for (size_t i = out_fds_max; i < fd_count; i++) {
-                    close(fds[i]);
-                }
-                fd_count = out_fds_max;
+                close_fds(&msg);
+                return IPC_ERROR_BUFFER; // Buffer too small
             }
 
             // Copy file descriptors to output buffer
